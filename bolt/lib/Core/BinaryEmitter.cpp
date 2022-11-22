@@ -1043,16 +1043,16 @@ void BinaryEmitter::emitLSDA(BinaryFunction &BF, const FunctionFragment &FF) {
 
   for (int Index = TypeTable.size() - 1; Index >= 0; --Index) {
     const uint64_t TypeAddress = TypeTable[Index];
+    const MCSymbol *TypeSymbol =
+        BC.getOrCreateGlobalSymbol(TypeAddress, "TI", 0, TTypeAlignment);
     switch (TTypeEncoding & 0x70) {
     default:
       llvm_unreachable("unsupported TTypeEncoding");
     case dwarf::DW_EH_PE_absptr:
-      Streamer.emitIntValue(TypeAddress, TTypeEncodingSize);
+      Streamer.emitSymbolValue(TypeSymbol, TTypeEncodingSize);
       break;
     case dwarf::DW_EH_PE_pcrel: {
       if (TypeAddress) {
-        const MCSymbol *TypeSymbol =
-            BC.getOrCreateGlobalSymbol(TypeAddress, "TI", 0, TTypeAlignment);
         MCSymbol *DotSymbol = BC.Ctx->createNamedTempSymbol();
         Streamer.emitLabel(DotSymbol);
         const MCBinaryExpr *SubDotExpr = MCBinaryExpr::createSub(

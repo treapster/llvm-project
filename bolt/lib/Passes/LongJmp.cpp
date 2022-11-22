@@ -20,7 +20,7 @@ namespace opts {
 extern cl::OptionCategory BoltOptCategory;
 extern llvm::cl::opt<unsigned> AlignText;
 extern cl::opt<unsigned> AlignFunctions;
-extern cl::opt<bool> UseOldText;
+extern cl::opt<bool> Rewrite;
 extern cl::opt<bool> HotFunctionsAtEnd;
 
 static cl::opt<bool> GroupStubs("group-stubs",
@@ -375,7 +375,7 @@ uint64_t LongJmpPass::tentativeLayoutRelocMode(
 
 void LongJmpPass::tentativeLayout(
     const BinaryContext &BC, std::vector<BinaryFunction *> &SortedFunctions) {
-  uint64_t DotAddress = BC.LayoutStartAddress;
+  uint64_t DotAddress = BC.InputAddressSpaceEnd;
 
   if (!BC.HasRelocations) {
     for (BinaryFunction *Func : SortedFunctions) {
@@ -392,22 +392,17 @@ void LongJmpPass::tentativeLayout(
 
   // Relocation mode
   uint64_t EstimatedTextSize = 0;
-  if (opts::UseOldText) {
+  if (opts::Rewrite) {
     EstimatedTextSize = tentativeLayoutRelocMode(BC, SortedFunctions, 0);
 
     // Initial padding
-    if (EstimatedTextSize <= BC.OldTextSectionSize) {
-      DotAddress = BC.OldTextSectionAddress;
-      uint64_t Pad =
-          offsetToAlignment(DotAddress, llvm::Align(opts::AlignText));
-      if (Pad + EstimatedTextSize <= BC.OldTextSectionSize) {
-        DotAddress += Pad;
-      }
-    }
+    DotAddress = BC.OldTextSectionAddress;
+    uint64_t Pad = offsetToAlignment(DotAddress, llvm::Align(opts::AlignText));
+    DotAddress += Pad;
   }
 
-  if (!EstimatedTextSize || EstimatedTextSize > BC.OldTextSectionSize)
-    DotAddress = alignTo(BC.LayoutStartAddress, opts::AlignText);
+  if (!EstimatedTextSize)
+    DotAddress = alignTo(BC.InputAddressSpaceEnd, opts::AlignText);
 
   tentativeLayoutRelocMode(BC, SortedFunctions, DotAddress);
 }

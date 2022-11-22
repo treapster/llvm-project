@@ -159,7 +159,8 @@ public:
       : BC(BC), Name(getName(Section)), Section(Section),
         Contents(getContents(Section)), Address(Section.getAddress()),
         Size(Section.getSize()), Alignment(Section.getAlignment().value()),
-        OutputName(Name), SectionNumber(++Count) {
+        OutputName(Name), OutputSize(Size), OutputContents(Contents),
+        SectionNumber(++Count) {
     if (isELF()) {
       ELFType = ELFSectionRef(Section).getType();
       ELFFlags = ELFSectionRef(Section).getFlags();
@@ -214,34 +215,19 @@ public:
 
   // Order sections by their immutable properties.
   bool operator<(const BinarySection &Other) const {
-    // Allocatable before non-allocatable.
-    if (isAllocatable() != Other.isAllocatable())
-      return isAllocatable() > Other.isAllocatable();
-
-    // Input sections take precedence.
-    if (hasSectionRef() != Other.hasSectionRef())
-      return hasSectionRef() > Other.hasSectionRef();
-
-    // Compare allocatable input sections by their address.
-    if (hasSectionRef() && getAddress() != Other.getAddress())
+    if (getAddress() != Other.getAddress())
       return getAddress() < Other.getAddress();
-    if (hasSectionRef() && getAddress() && getSize() != Other.getSize())
+
+    // We want to keep tdata/tbss together to properly calculate
+    // TLS segment size, and since .tbss may have the same address
+    // as the section after it, we have this check
+    if (isTBSS() || Other.isTBSS())
+      return isTBSS() && !Other.isTBSS();
+
+    if (getSize() != Other.getSize())
       return getSize() < Other.getSize();
 
-    // Code before data.
-    if (isText() != Other.isText())
-      return isText() > Other.isText();
-
-    // Read-only before writable.
-    if (isWritable() != Other.isWritable())
-      return isWritable() < Other.isWritable();
-
-    // BSS at the end.
-    if (isBSS() != Other.isBSS())
-      return isBSS() < Other.isBSS();
-
-    // Otherwise, preserve the order of creation.
-    return SectionNumber < Other.SectionNumber;
+    return getName() < Other.getName();
   }
 
   ///
@@ -280,7 +266,7 @@ public:
   bool isWritable() const { return (ELFFlags & ELF::SHF_WRITE); }
   bool isAllocatable() const {
     if (isELF()) {
-      return (ELFFlags & ELF::SHF_ALLOC) && !isTBSS();
+      return (ELFFlags & ELF::SHF_ALLOC);
     } else {
       // On non-ELF assume all sections are allocatable.
       return true;

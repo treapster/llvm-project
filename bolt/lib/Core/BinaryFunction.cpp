@@ -4023,6 +4023,11 @@ void BinaryFunction::calculateLoopInfo() {
 }
 
 void BinaryFunction::updateOutputValues(const MCAsmLayout &Layout) {
+  if (isPLTFunction()) {
+    const uint64_t Offset = getAddress() - OriginSection->getAddress();
+    setOutputAddress(OriginSection->getOutputAddress() + Offset);
+    return;
+  }
   if (!isEmitted()) {
     assert(!isInjected() && "injected function should be emitted");
     setOutputAddress(getAddress());

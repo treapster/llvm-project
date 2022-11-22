@@ -482,7 +482,7 @@ void BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   Manager.registerPass(std::make_unique<AssignSections>());
 
   // Patch original function entries
-  if (BC.HasRelocations)
+  if (BC.HasRelocations && !opts::Rewrite)
     Manager.registerPass(std::make_unique<PatchEntries>());
 
   // This pass turns tail calls into jumps which makes them invisible to
