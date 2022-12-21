@@ -597,6 +597,11 @@ public:
 
   virtual bool isLeave(const MCInst &Inst) const { return false; }
 
+  virtual bool isADD(const MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   virtual bool isADRP(const MCInst &Inst) const {
     llvm_unreachable("not implemented");
     return false;
@@ -1438,8 +1443,7 @@ public:
 
   /// Analyze branch \p Instruction in PLT section and try to determine
   /// associated got entry address.
-  virtual uint64_t analyzePLTEntry(MCInst &Instruction,
-                                   InstructionIterator Begin,
+  virtual uint64_t analyzePLTEntry(InstructionIterator Begin,
                                    InstructionIterator End,
                                    uint64_t BeginPC) const {
     llvm_unreachable("not implemented");
@@ -1487,9 +1491,17 @@ public:
     llvm_unreachable("not implemented");
   }
 
-  virtual bool matchAdrpAddPair(const MCInst &Adrp, const MCInst &Add) const {
+  // match adrp+add or adrp+ldr
+  virtual bool matchAdrpPair(const MCInst &Adrp, const MCInst &AddOrLdr) const {
     llvm_unreachable("not implemented");
     return false;
+  }
+
+  virtual bool patchPLTInstructions(InstructionIterator Begin,
+                                    InstructionIterator End,
+                                    const MCSymbol *Target,
+                                    MCContext *Ctx) const {
+    llvm_unreachable("not implemented");
   }
 
   virtual int getShortJmpEncodingSize() const {

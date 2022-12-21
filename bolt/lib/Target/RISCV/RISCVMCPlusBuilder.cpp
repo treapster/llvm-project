@@ -281,8 +281,7 @@ public:
     return true;
   }
 
-  uint64_t analyzePLTEntry(MCInst &Instruction, InstructionIterator Begin,
-                           InstructionIterator End,
+  uint64_t analyzePLTEntry(InstructionIterator Begin, InstructionIterator End,
                            uint64_t BeginPC) const override {
     auto I = Begin;
 

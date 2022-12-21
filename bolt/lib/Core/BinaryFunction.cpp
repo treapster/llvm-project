@@ -1155,7 +1155,12 @@ void BinaryFunction::handleAArch64IndirectCall(MCInst &Instruction,
                               TargetAddress);
   }
 }
-
+bool BinaryFunction::handlePLT() {
+  assert(BasicBlocks.size() == 1);
+  return BC.MIB->patchPLTInstructions(BasicBlocks[0]->begin(),
+                                      BasicBlocks[0]->end(), getPLTSymbol(),
+                                      BC.Ctx.get());
+}
 bool BinaryFunction::disassemble() {
   NamedRegionTimer T("disassemble", "Disassemble function", "buildfuncs",
                      "Build Binary Functions", opts::TimeBuild);
@@ -1326,17 +1331,75 @@ bool BinaryFunction::disassemble() {
     } else if (BC.isAArch64() || BC.isRISCV()) {
       // Check if there's a relocation associated with this instruction.
       bool UsedReloc = false;
-      for (auto Itr = Relocations.lower_bound(Offset),
-                ItrE = Relocations.lower_bound(Offset + Size);
-           Itr != ItrE; ++Itr) {
+      if (auto Itr = Relocations.find(Offset); Itr != Relocations.end()) {
         const Relocation &Relocation = Itr->second;
-        int64_t Value = Relocation.Value;
-        const bool Result = BC.MIB->replaceImmWithSymbolRef(
-            Instruction, Relocation.Symbol, Relocation.Addend, Ctx.get(), Value,
-            Relocation.Type);
+        bool Result = false;
+
+        bool TLSAccessNotHandled =
+            Relocation.Type == ELF::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC;
+        enum AccessType { Default, RelaxedGOTAccess, TLSGOT };
+
+        AccessType Type = [&]() {
+          if (!Instructions.size() || Itr == Relocations.begin())
+            return Default;
+          if (std::prev(Itr)->second.Type == ELF::R_AARCH64_ADR_GOT_PAGE &&
+              Relocation.Type == ELF::R_AARCH64_ADD_ABS_LO12_NC &&
+              BC.MIB->matchAdrpPair(Instructions.rbegin()->second, Instruction))
+            return RelaxedGOTAccess;
+
+          if (Relocation.Type == ELF::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC) {
+            assert(std::prev(Itr)->second.Type ==
+                       ELF::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 &&
+                   "Couldn't find the corresponding ADRP relocation for "
+                   "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC");
+            assert(BC.MIB->matchAdrpPair(Instructions.rbegin()->second,
+                                         Instruction) &&
+                   "Can't match TLS access instructions");
+            return TLSGOT;
+          }
+          return Default;
+        }();
+        if (Type != Default) {
+
+          const uint64_t PageAddress = std::prev(Itr)->second.Value;
+          const uint64_t PageOffset = Relocation.Value;
+
+          assert((PageAddress & 0xfff) == 0 && "Invalid ADRP operand");
+          assert((PageOffset & 0xfff) == PageOffset &&
+                 "Invalid ADD/LDR operand");
+
+          const uint64_t TargetAddress = PageAddress + PageOffset;
+
+          assert(TargetAddress && "ADRP + ADD/LDR references zero");
+
+          const MCSymbol *Symbol = [&]() -> const MCSymbol * {
+            if (Type == RelaxedGOTAccess) {
+              assert(Relocation.Symbol && "ADRP+ADD references unknown symbol");
+              return Relocation.Symbol;
+            }
+            return BC.getOrCreateGlobalSymbol(TargetAddress, "DATAat");
+          }();
+
+          Result = BC.MIB->setOperandToSymbolRef(
+              Instructions.rbegin()->second, /*OpNum*/ 1, Symbol, 0,
+              BC.Ctx.get(), ELF::R_AARCH64_ADR_PREL_PG_HI21);
+
+          Result =
+              BC.MIB->setOperandToSymbolRef(Instruction, /*OpNum*/ 2, Symbol, 0,
+                                            BC.Ctx.get(), Relocation.Type) &&
+              Result;
+          TLSAccessNotHandled = false;
+        } else {
+          int64_t Value = Relocation.Value;
+          Result = BC.MIB->replaceImmWithSymbolRef(
+              Instruction, Relocation.Symbol, Relocation.Addend, Ctx.get(),
+              Value, Relocation.Type);
+        }
         (void)Result;
         assert(Result && "cannot replace immediate with relocation");
-
+        assert(!TLSAccessNotHandled &&
+               "Unhandled R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC");
+        (void)TLSAccessNotHandled;
         // For aarch64, if we replaced an immediate with a symbol from a
         // relocation, we mark it so we do not try to further process a
         // pc-relative operand. All we need is the symbol.

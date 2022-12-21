@@ -647,7 +647,6 @@ Error RewriteInstance::run() {
     return E;
   adjustCommandLineOptions();
   discoverFileObjects();
-  createGOTPLTRelocations();
   preprocessProfileData();
 
   // Skip disassembling if we have a translation table and we are running an
@@ -1234,6 +1233,7 @@ void RewriteInstance::discoverFileObjects() {
 
   if (!opts::LinuxKernelMode) {
     // Read all relocations now that we have binary functions mapped.
+    createGOTPLTRelocations();
     processRelocations();
   }
 
@@ -1289,39 +1289,62 @@ void RewriteInstance::registerFragments() {
   }
 }
 
-void RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
-                                              uint64_t EntryAddress,
-                                              uint64_t EntrySize) {
+BinaryFunction *RewriteInstance::createPLTBinaryFunction(uint64_t TargetAddress,
+                                                         uint64_t EntryAddress,
+                                                         uint64_t EntrySize) {
   if (!TargetAddress)
-    return;
+    return nullptr;
 
   auto setPLTSymbol = [&](BinaryFunction *BF, StringRef Name) {
     const unsigned PtrSize = BC->AsmInfo->getCodePointerSize();
     MCSymbol *TargetSymbol = BC->registerNameAtAddress(
         Name.str() + "@GOT", TargetAddress, PtrSize, PtrSize);
     BF->setPLTSymbol(TargetSymbol);
+    BF->setPseudo(true);
+    BF->setIgnored();
   };
 
   BinaryFunction *BF = BC->getBinaryFunctionAtAddress(EntryAddress);
   if (BF && BC->isAArch64()) {
     // Handle IFUNC trampoline
     setPLTSymbol(BF, BF->getOneName());
-    return;
+    return BF;
   }
 
-  const Relocation *Rel = BC->getDynamicRelocationAt(TargetAddress);
-  if (!Rel || !Rel->Symbol)
-    return;
+  MCSymbol *Symbol = [&]() -> MCSymbol * {
+    const Relocation *Rel = BC->getDynamicRelocationAt(TargetAddress);
+    if (Rel && Rel->Symbol)
+      return Rel->Symbol;
+    if (auto Addr =
+            BC->getUnsignedValueAtAddress(TargetAddress, sizeof(uint64_t))) {
+      if (auto *Data = BC->getBinaryDataAtAddress(*Addr))
+        return Data->getSymbol();
+    }
+    return nullptr;
+  }();
 
   ErrorOr<BinarySection &> Section = BC->getSectionForAddress(EntryAddress);
   assert(Section && "cannot get section for address");
+  if (!Symbol) {
+    assert(EntryAddress == Section->getAddress() &&
+           "Unknown PLT entry after PLT header");
+    if (!BF)
+      BF = BC->createBinaryFunction("__BOLT_PSEUDO_" + Section->getName().str(),
+                                    *Section, EntryAddress, 0, EntrySize,
+                                    Section->getAlignment());
+    BF->setPseudo(true);
+    BF->setIgnored();
+    BF->setPLTSymbol(BC->getOrCreateGlobalSymbol(TargetAddress, "DATAat"));
+    return BF;
+  }
   if (!BF)
-    BF = BC->createBinaryFunction(Rel->Symbol->getName().str() + "@PLT",
-                                  *Section, EntryAddress, 0, EntrySize,
+    BF = BC->createBinaryFunction(Symbol->getName().str() + "@PLT", *Section,
+                                  EntryAddress, 0, EntrySize,
                                   Section->getAlignment());
   else
-    BF->addAlternativeName(Rel->Symbol->getName().str() + "@PLT");
-  setPLTSymbol(BF, Rel->Symbol->getName());
+    BF->addAlternativeName(Symbol->getName().str() + "@PLT");
+  setPLTSymbol(BF, Symbol->getName());
+  return BF;
 }
 
 void RewriteInstance::disassemblePLTSectionAArch64(BinarySection &Section) {
@@ -1356,22 +1379,31 @@ void RewriteInstance::disassemblePLTSectionAArch64(BinarySection &Section) {
     while (InstrOffset < SectionSize) {
       disassembleInstruction(InstrOffset, Instruction, InstrSize);
       EntrySize += InstrSize;
-      if (!BC->MIB->isIndirectBranch(Instruction)) {
-        Instructions.emplace_back(Instruction);
-        InstrOffset += InstrSize;
-        continue;
+      Instructions.emplace_back(Instruction);
+      InstrOffset += InstrSize;
+      if (BC->MIB->isIndirectBranch(Instruction)) {
+        break;
       }
-
-      const uint64_t EntryAddress = SectionAddress + EntryOffset;
-      const uint64_t TargetAddress = BC->MIB->analyzePLTEntry(
-          Instruction, Instructions.begin(), Instructions.end(), EntryAddress);
-
-      createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
-      break;
     }
-
-    // Branch instruction
-    InstrOffset += InstrSize;
+    const uint64_t EntryAddress = SectionAddress + EntryOffset;
+    const uint64_t TargetAddress = BC->MIB->analyzePLTEntry(
+        Instructions.begin(), Instructions.end(), EntryAddress);
+    BinaryFunction *BF =
+        createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
+    assert(BF && "Failed to create PLT function");
+    if (opts::Rewrite) {
+      assert(BF && BF->empty());
+      BF->setSize(EntrySize);
+      BF->updateState(BinaryFunction::State::Disassembled);
+      BinaryBasicBlock *BB = BF->addBasicBlockAt(0, BF->getSymbol());
+      for (auto &Inst : Instructions) {
+        BB->addInstruction(Inst);
+      }
+      bool Ok = BF->handlePLT();
+      assert(Ok && "Failed to handle PLT entry");
+      (void)Ok;
+      BF->updateState(BinaryFunction::State::CFG);
+    }
 
     // Skip nops if any
     while (InstrOffset < SectionSize) {
@@ -1380,12 +1412,17 @@ void RewriteInstance::disassemblePLTSectionAArch64(BinarySection &Section) {
         break;
 
       InstrOffset += InstrSize;
+      if (opts::Rewrite) {
+        BF->getBasicBlockAtOffset(0)->addInstruction(Instruction);
+        BF->setSize(BF->getSize() + InstrSize);
+      }
     }
   }
 }
+
 void RewriteInstance::createGOTPLTRelocations() {
   const uint64_t RelType = Relocation::getAbs64();
-  auto CreateRelocations = [this, RelType](BinarySection &Section) {
+  auto CreateRelocations = [this, RelType](BinarySection &Section, bool IsGot) {
     DataExtractor DE(Section.getContents(), BC->AsmInfo->isLittleEndian(),
                      BC->AsmInfo->getCodePointerSize());
     const uint64_t Size = Section.getSize();
@@ -1395,17 +1432,33 @@ void RewriteInstance::createGOTPLTRelocations() {
       const uint64_t Address = DE.getU64(&DataOffset);
       if (Address == 0)
         continue;
-      MCSymbol *Sym = BC->getOrCreateGlobalSymbol(Address, "SYMBOLat0x");
+      MCSymbol *Sym = BC->getOrCreateGlobalSymbol(Address, "SYMBOLat");
       Section.addRelocation(Offset, Sym, RelType, 0);
+      if (!IsGot || BC->isX86())
+        continue;
+      if (BinaryData *BD = BC->getBinaryDataAtAddress(Address)) {
+        for (auto *Sym : BD->getSymbols()) {
+          StringRef Name = Sym->getName();
+          Name = Name.substr(0, Name.find('/'));
+          if (Name.empty())
+            continue;
+          GOTSymbolsByName[Name.str()] = Section.getAddress() + Offset;
+
+          LLVM_DEBUG(
+              outs() << formatv(
+                  "BOLT-INFO: BD {0} with address {1:x} at got entry {2:x}\n",
+                  Sym->getName(), Address, Section.getAddress() + Offset););
+        }
+      }
     }
   };
 
   auto GOTPLTSection = BC->getUniqueSectionByName(".got.plt");
   if (opts::Rewrite && GOTPLTSection)
-    CreateRelocations(*GOTPLTSection);
+    CreateRelocations(*GOTPLTSection, false);
   auto GOTSection = BC->getUniqueSectionByName(".got");
   if (GOTSection)
-    CreateRelocations(*GOTSection);
+    CreateRelocations(*GOTSection, true);
 }
 
 
@@ -1447,7 +1500,7 @@ void RewriteInstance::disassemblePLTSectionRISCV(BinarySection &Section) {
 
     const uint64_t EntryAddress = SectionAddress + EntryOffset;
     const uint64_t TargetAddress = BC->MIB->analyzePLTEntry(
-        Instruction, Instructions.begin(), Instructions.end(), EntryAddress);
+        Instructions.begin(), Instructions.end(), EntryAddress);
 
     createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
   }
@@ -1510,8 +1563,10 @@ void RewriteInstance::disassemblePLTSectionX86(BinarySection &Section,
       }
       if (BC->MIB->isIndirectBranch(Instruction)) {
         assert(TargetAddress);
-        createPLTBinaryFunction(TargetAddress, SectionAddress + EntryOffset,
-                                EntrySize);
+        const uint64_t EntryAddress = SectionAddress + EntryOffset;
+        BinaryFunction *BF =
+            createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
+        assert(BF && "Failed to create PLT function");
       }
       InstrOffset += InstrSize;
     }
@@ -1536,15 +1591,9 @@ void RewriteInstance::disassemblePLT() {
 
     BinaryFunction *PltBF;
     auto BFIter = BC->getBinaryFunctions().find(Section.getAddress());
-    if (BFIter != BC->getBinaryFunctions().end()) {
-      PltBF = &BFIter->second;
-    } else {
-      // If we did not register any function at the start of the section,
-      // then it must be a general PLT entry. Add a function at the location.
-      PltBF = BC->createBinaryFunction(
-          "__BOLT_PSEUDO_" + Section.getName().str(), Section,
-          Section.getAddress(), 0, PLTSI->EntrySize, Section.getAlignment());
-    }
+    assert(BFIter != BC->getBinaryFunctions().end() &&
+           "Failed to create PLT header function");
+    PltBF = &BFIter->second;
     PltBF->setPseudo(true);
   }
 }
@@ -1995,7 +2044,14 @@ bool RewriteInstance::analyzeRelocation(
     // Section symbols are marked as ST_Debug.
     IsSectionRelocation = (cantFail(Symbol.getType()) == SymbolRef::ST_Debug);
     // Check for PLT entry registered with symbol name
-    if (!SymbolAddress && (IsAArch64 || BC->isRISCV())) {
+    if (Relocation::isGOT(RType) && (IsAArch64 || BC->isRISCV())) {
+      if (auto It =
+              GOTSymbolsByName.find(SymbolName.substr(0, SymbolName.find("@")));
+          It != GOTSymbolsByName.end()) {
+        SymbolAddress = It->second;
+      }
+    }
+    if (!SymbolAddress && IsAArch64) {
       const BinaryData *BD = BC->getPLTBinaryDataByName(SymbolName);
       SymbolAddress = BD ? BD->getAddress() : 0;
     }
@@ -2031,7 +2087,7 @@ bool RewriteInstance::analyzeRelocation(
   // For GOT relocs, do not subtract addend as the addend does not refer
   // to this instruction's target, but it refers to the target in the GOT
   // entry.
-  if (Relocation::isGOT(RType)) {
+  if (Relocation::isGOT(RType) && (BC->isX86() || !SymbolAddress)) {
     Addend = 0;
     SymbolAddress = ExtractedValue + PCRelOffset;
   } else if (Relocation::isTLS(RType)) {
@@ -2184,6 +2240,27 @@ void RewriteInstance::readDynamicRelocations(const SectionRef &Section,
     if (Symbol)
       SymbolIndex[Symbol] = getRelocationSymbol(InputFile, Rel);
 
+    if (BC->isAArch64() &&
+        (RType == ELF::R_AARCH64_GLOB_DAT || RType == ELF::R_AARCH64_RELATIVE ||
+         RType == ELF::R_AARCH64_TLS_TPREL64)) {
+      if (Symbol && !SymbolName.empty()) {
+        GOTSymbolsByName[SymbolName.str()] = Rel.getOffset();
+        LLVM_DEBUG(dbgs() << formatv("BOLT-INFO: GOT entry at {0:x} contains "
+                                     "symbol {1} with address {2:x}\n",
+                                     Rel.getOffset(), SymbolName, Addend););
+      } else if (BinaryData *BD = BC->getBinaryDataAtAddress(Addend)) {
+        LLVM_DEBUG(outs() << formatv("BOLT-INFO: GOT entry at {0:x} contains "
+                                     "symbol {1} with address {2:x}\n",
+                                     Rel.getOffset(), BD->getName(), Addend););
+
+        for (MCSymbol *Sym : BD->getSymbols()) {
+          StringRef Name = Sym->getName().substr(0, Sym->getName().find('/'));
+          if (Name.empty())
+            continue;
+          GOTSymbolsByName[Name.str()] = Rel.getOffset();
+        }
+      }
+    }
     BC->addDynamicRelocation(Rel.getOffset(), Symbol, RType, Addend);
   }
 }
@@ -2534,13 +2611,13 @@ void RewriteInstance::handleRelocation(BinarySection &RelocatedSection,
 
   if (ForceRelocation) {
     std::string Name =
-        Relocation::isGOT(RType) ? "__BOLT_got_zero" : SymbolName;
-    ReferencedSymbol = BC->registerNameAtAddress(Name, 0, 0, 0);
-    SymbolAddress = 0;
-    if (Relocation::isGOT(RType))
-      Addend = Address;
-    LLVM_DEBUG(dbgs() << "BOLT-DEBUG: forcing relocation against symbol "
-                      << SymbolName << " with addend " << Addend << '\n');
+        Relocation::isGOT(RType) ? SymbolName + "@GOT" : SymbolName;
+    // ReferencedSymbol = BC->registerNameAtAddress(Name, Address, 0, 0);
+    ReferencedSymbol = BC->registerNameAtAddress(Name, SymbolAddress, 0, 0);
+    LLVM_DEBUG(
+        dbgs() << formatv("BOLT-DEBUG: forcing relocation against symbol {0} "
+                          "with addend {1:x} and address {2:x}\n",
+                          SymbolName, Addend, SymbolAddress));
   } else if (ReferencedBF) {
     ReferencedSymbol = ReferencedBF->getSymbol();
     uint64_t RefFunctionOffset = 0;

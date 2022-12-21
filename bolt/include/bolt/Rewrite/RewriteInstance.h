@@ -288,8 +288,9 @@ private:
   /// Auxiliary function to create .plt BinaryFunction on \p EntryAddres
   /// with the \p EntrySize size. \p TargetAddress is the .got entry
   /// associated address.
-  void createPLTBinaryFunction(uint64_t TargetAddress, uint64_t EntryAddress,
-                               uint64_t EntrySize);
+  BinaryFunction *createPLTBinaryFunction(uint64_t TargetAddress,
+                                          uint64_t EntryAddress,
+                                          uint64_t EntrySize);
 
   /// Disassemble aarch64-specific .plt \p Section auxiliary function
   void disassemblePLTSectionAArch64(BinarySection &Section);
@@ -504,6 +505,12 @@ private:
   /// Index of specified symbol in the dynamic symbol table. NOTE Currently it
   /// is filled and used only with the relocations-related symbols.
   std::unordered_map<const MCSymbol *, uint32_t> SymbolIndex;
+
+  // A map to get GOT entry address by symbol name for AArch64.
+  // Used to resolve non-relaxed GOT accesses.
+  // It is not strictly GOT and may include entries from init_array
+  // or similar sections since references to them use GOT-typed relocations.
+  std::unordered_map<std::string, uint64_t> GOTSymbolsByName;
 
   /// Store all non-zero symbols in this map for a quick address lookup.
   std::map<uint64_t, llvm::object::SymbolRef> FileSymRefs;
