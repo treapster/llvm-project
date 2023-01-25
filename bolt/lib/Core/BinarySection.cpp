@@ -32,6 +32,28 @@ bool BinarySection::isELF() const { return BC.isELF(); }
 
 bool BinarySection::isMachO() const { return BC.isMachO(); }
 
+/// Add a new relocation at the given /p Offset.
+void BinarySection::addRelocation(uint64_t Offset, MCSymbol *Symbol,
+                                  uint64_t Type, uint64_t Addend,
+                                  uint64_t Value, bool Pending) {
+  if (Name == BC.getMainCodeSectionName()) {
+    errs() << formatv(
+        "BOLT-ERROR: Adding reloc to .text at {0:x}, symbol {1}\n", Offset,
+        Symbol ? Symbol->getName() : "");
+    // assert false for stacktrace
+    assert(false &&
+           "Relocations for .text should be handled by BinaryFunction!");
+    exit(1);
+  }
+  assert(Offset < getSize() && "offset not within section bounds");
+  if (!Pending) {
+    Relocations.emplace(Relocation{Offset, Symbol, Type, Addend, Value});
+  } else {
+    PendingRelocations.emplace_back(
+        Relocation{Offset, Symbol, Type, Addend, Value});
+  }
+}
+
 uint64_t
 BinarySection::hash(const BinaryData &BD,
                     std::map<const BinaryData *, uint64_t> &Cache) const {

@@ -727,7 +727,7 @@ Error RewriteInstance::run() {
   if (opts::DiffOnly)
     return Error::success();
 
-  preregisterSections();
+  renameAndPreregisterSections();
 
   runOptimizationPasses();
 
@@ -3155,24 +3155,30 @@ void RewriteInstance::runOptimizationPasses() {
   BinaryFunctionPassManager::runAllPasses(*BC);
 }
 
-void RewriteInstance::preregisterSections() {
-  // Preregister sections before emission to set their order in the output.
-  const unsigned ROFlags = BinarySection::getFlags(/*IsReadOnly*/ true,
-                                                   /*IsText*/ false,
-                                                   /*IsAllocatable*/ true);
-  if (BinarySection *EHFrameSection = getSection(getEHFrameSectionName())) {
-    // New .eh_frame.
-    BC->registerOrUpdateSection(getNewSecPrefix() + getEHFrameSectionName(),
-                                ELF::SHT_PROGBITS, ROFlags);
-    // Fully register a relocatable copy of the original .eh_frame.
+void RewriteInstance::renameAndPreregisterSections() {
+
+  auto Rename = [this](BinarySection *Section) {
+    if (!Section)
+      return;
+    std::string OldName = Section->getName().str();
+    const Twine NewName = getOrgSecPrefix() + Section->getName();
+    LLVM_DEBUG(dbgs() << "BOLT-DEBUG: renaming input section "
+                      << Section->getName() << " to " << NewName << "\n";);
+    BC->renameSection(*Section, NewName);
+    BC->registerOrUpdateSection(OldName, ELF::SHT_PROGBITS,
+                                Section->getELFFlags());
+  };
+
+  if (BC->HasRelocations)
+    Rename(getSection(BC->getMainCodeSectionName()));
+  Rename(getSection(getEHFrameSectionName()));
+  if (EHFrameSection)
     BC->registerSection(".relocated.eh_frame", *EHFrameSection);
-  }
-  BC->registerOrUpdateSection(getNewSecPrefix() + ".gcc_except_table",
-                              ELF::SHT_PROGBITS, ROFlags);
-  BC->registerOrUpdateSection(getNewSecPrefix() + ".rodata", ELF::SHT_PROGBITS,
-                              ROFlags);
-  BC->registerOrUpdateSection(getNewSecPrefix() + ".rodata.cold",
-                              ELF::SHT_PROGBITS, ROFlags);
+  Rename(getSection(".eh_frame_hdr"));
+  Rename(getSection(".gcc_except_table"));
+
+  if (opts::JumpTables > JTS_BASIC)
+    Rename(getSection(".rodata"));
 }
 
 void RewriteInstance::emitAndLink() {
@@ -3218,11 +3224,6 @@ void RewriteInstance::emitAndLink() {
            << OutObjectPath << "\n";
   }
 
-  ErrorOr<BinarySection &> TextSection =
-      BC->getUniqueSectionByName(BC->getMainCodeSectionName());
-  if (BC->HasRelocations && TextSection)
-    BC->renameSection(*TextSection, getOrgSecPrefix() + ".text");
-
   //////////////////////////////////////////////////////////////////////////////
   // Assign addresses to new sections.
   //////////////////////////////////////////////////////////////////////////////
@@ -3232,8 +3233,6 @@ void RewriteInstance::emitAndLink() {
       MemoryBuffer::getMemBuffer(ObjectBuffer, "in-memory object file", false);
 
   auto EFMM = std::make_unique<ExecutableFileMemoryManager>(*BC);
-  EFMM->setNewSecPrefix(getNewSecPrefix());
-  EFMM->setOrgSecPrefix(getOrgSecPrefix());
 
   Linker = std::make_unique<JITLinkLinker>(*BC, std::move(EFMM));
   Linker->loadObject(ObjectMemBuffer->getMemBufferRef(),
@@ -3301,20 +3300,38 @@ void RewriteInstance::updateMetadata() {
 void RewriteInstance::mapFileSections(BOLTLinker::SectionMapper MapSection) {
   BC->deregisterUnusedSections();
 
+  auto RestoreName = [this](BinarySection *Section, StringRef Name) {
+    if (!Section)
+      return;
+    LLVM_DEBUG(dbgs() << formatv("BOLT-DEBUG: original section {0} was "
+                                 "not duplicated, restoring name\n",
+                                 Name));
+    assert(!getSection(Name) && "Unexpected section emitted");
+    BC->renameSection(*Section, Name);
+  };
   // If no new .eh_frame was written, remove relocated original .eh_frame.
   BinarySection *RelocatedEHFrameSection =
       getSection(".relocated" + getEHFrameSectionName());
   if (RelocatedEHFrameSection && RelocatedEHFrameSection->hasValidSectionID()) {
-    BinarySection *NewEHFrameSection =
-        getSection(getNewSecPrefix() + getEHFrameSectionName());
+    BinarySection *NewEHFrameSection = getSection(getEHFrameSectionName());
     if (!NewEHFrameSection || !NewEHFrameSection->isFinalized()) {
       // JITLink will still have to process relocations for the section, hence
       // we need to assign it the address that wouldn't result in relocation
       // processing failure.
       MapSection(*RelocatedEHFrameSection, NextAvailableAddress);
       BC->deregisterSection(*RelocatedEHFrameSection);
+
+      // Remove org prefix from sections since they weren't duplicated
+      RestoreName(&*EHFrameSection, getEHFrameSectionName());
+      RestoreName(getSection(getOrgSecPrefix() + getEHFrameHeaderSectionName()),
+                  getEHFrameHeaderSectionName());
+      RestoreName(getSection(getOrgSecPrefix() + ".gcc_except_table"),
+                  ".gcc_except_table");
     }
   }
+
+  if (!getSection(".rodata"))
+    RestoreName(getSection(getOrgSecPrefix() + ".rodata"), ".rodata");
 
   mapCodeSections(MapSection);
 
@@ -5349,19 +5366,21 @@ void RewriteInstance::rewriteFile() {
 }
 
 void RewriteInstance::writeEHFrameHeader() {
-  BinarySection *NewEHFrameSection =
-      getSection(getNewSecPrefix() + getEHFrameSectionName());
+  BinarySection *NewEHFrameSection = getSection(getEHFrameSectionName());
 
   // No need to update the header if no new .eh_frame was created.
-  if (!NewEHFrameSection)
+  if (!NewEHFrameSection || !NewEHFrameSection->hasValidSectionID()) {
     return;
+  }
 
   DWARFDebugFrame NewEHFrame(BC->TheTriple->getArch(), true,
                              NewEHFrameSection->getOutputAddress());
+
   Error E = NewEHFrame.parse(DWARFDataExtractor(
       NewEHFrameSection->getOutputContents(), BC->AsmInfo->isLittleEndian(),
       BC->AsmInfo->getCodePointerSize()));
   check_error(std::move(E), "failed to parse EH frame");
+  LLVM_DEBUG(dbgs() << "BOLT: writing a new .eh_frame_hdr\n");
 
   uint64_t RelocatedEHFrameAddress = 0;
   StringRef RelocatedEHFrameContents;
@@ -5396,9 +5415,6 @@ void RewriteInstance::writeEHFrameHeader() {
   const unsigned Flags = BinarySection::getFlags(/*IsReadOnly=*/true,
                                                  /*IsText=*/false,
                                                  /*IsAllocatable=*/true);
-  BinarySection *OldEHFrameHdrSection = getSection(".eh_frame_hdr");
-  if (OldEHFrameHdrSection)
-    OldEHFrameHdrSection->setOutputName(getOrgSecPrefix() + ".eh_frame_hdr");
 
   BinarySection &EHFrameHdrSec = BC->registerOrUpdateSection(
       getNewSecPrefix() + ".eh_frame_hdr", ELF::SHT_PROGBITS, Flags, nullptr,

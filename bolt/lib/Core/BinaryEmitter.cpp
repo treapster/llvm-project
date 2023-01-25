@@ -1163,8 +1163,12 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
     if (!Section.hasRelocations())
       continue;
 
-    StringRef Prefix = Section.hasSectionRef() ? OrgSecPrefix : "";
-    Section.emitAsData(Streamer, Prefix + Section.getName());
+    assert(Section.getOutputName() != BC.getMainCodeSectionName() &&
+           Section.getOutputName() !=
+               (OrgSecPrefix + BC.getMainCodeSectionName()).str() &&
+           ".text should not have relocations!");
+
+    Section.emitAsData(Streamer, Section.getOutputName());
     Section.clearRelocations();
   }
 }

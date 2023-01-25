@@ -155,7 +155,7 @@ private:
 
   void postProcessFunctions();
 
-  void preregisterSections();
+  void renameAndPreregisterSections();
 
   /// Run optimizations that operate at the binary, or post-linker, level.
   void runOptimizationPasses();
@@ -422,6 +422,7 @@ private:
   /// Common section names.
   static StringRef getEHFrameSectionName() { return ".eh_frame"; }
 
+  static StringRef getEHFrameHeaderSectionName() { return ".eh_frame_hdr"; }
   /// An instance of the input binary we are processing, externally owned.
   llvm::object::ELFObjectFileBase *InputFile;
 
