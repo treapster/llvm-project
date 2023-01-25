@@ -42,7 +42,7 @@ cl::OptionCategory HeatmapCategory("Heatmap options");
 
 cl::opt<unsigned> AlignText("align-text",
                             cl::desc("alignment of .text section"), cl::Hidden,
-                            cl::cat(BoltCategory));
+                            cl::init(64), cl::cat(BoltCategory));
 
 cl::opt<unsigned> AlignFunctions(
     "align-functions",

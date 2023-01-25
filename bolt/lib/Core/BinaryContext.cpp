@@ -49,7 +49,7 @@ using namespace llvm;
 
 namespace opts {
 
-cl::opt<bool> NoHugePages("no-huge-pages",
+cl::opt<bool> NoHugePages("no-huge-pages", cl::init(true),
                           cl::desc("use regular size pages for code alignment"),
                           cl::Hidden, cl::cat(BoltCategory));
 

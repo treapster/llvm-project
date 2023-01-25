@@ -1868,7 +1868,10 @@ void RewriteInstance::adjustCommandLineOptions() {
     opts::UseOldText = false;
   }
 
-  if (!opts::AlignText.getNumOccurrences())
+  if (opts::Hugify || opts::HotText)
+    BC->PageAlign = BinaryContext::HugePageSize;
+
+  if (opts::Hugify || opts::UseOldText)
     opts::AlignText = BC->PageAlign;
 
   if (opts::AlignText < opts::AlignFunctions)
