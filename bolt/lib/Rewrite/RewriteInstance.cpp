@@ -4203,6 +4203,14 @@ RewriteInstance::getOutputSections(ELFObjectFile<ELFT> *File,
     // Some sections are stripped
     if (!NameToIndex.count(SectionName))
       continue;
+    if (SectionName == ".rodata" || SectionName == ".text") {
+      std::string OrgSec = (getOrgSecPrefix() + SectionName).str();
+      // if we emitted new .rodata or .text, point the indices to the old ones
+      if (NameToIndex.find(OrgSec) != NameToIndex.end()) {
+        NewSectionIndex[OldIndex] = NameToIndex[OrgSec];
+        continue;
+      }
+    }
     NewSectionIndex[OldIndex] = NameToIndex[SectionName];
   }
   for (const ELFShdrTy &Section : InputSections) {
