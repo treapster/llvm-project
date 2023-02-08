@@ -3491,6 +3491,7 @@ void RewriteInstance::remapLoadableSegments(
     NextAvailableOffset =
         std::max(NextAvailableOffset, Phdr.p_offset + Phdr.p_filesz);
   }
+
   FirstNonAllocatableOffset = NextAvailableOffset;
   NextAvailableAddress = alignTo(NextAvailableAddress, BC->PageAlign);
   NextAvailableOffset = alignTo(NextAvailableOffset, BC->PageAlign);
