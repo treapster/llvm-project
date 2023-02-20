@@ -3510,7 +3510,12 @@ void RewriteInstance::remapLoadableSegments(
   PHDRTableAddress = NextAvailableAddress;
   PHDRTableOffset = NextAvailableOffset;
 
+  auto NewRWSegmentContents =
+      BC->getNewSectionsByFlags(ELF::SHF_ALLOC | ELF::SHF_WRITE);
+
   Phnum += !HasProgramHeaderSegment + 1;
+  if (!BC->getRuntimeLibrary())
+    Phnum += !NewRWSegmentContents.empty();
   uint64_t PHDRTableSize = Phnum * sizeof(ELF64LE::Phdr);
   NextAvailableAddress += PHDRTableSize;
   NextAvailableOffset += PHDRTableSize;
@@ -3520,7 +3525,7 @@ void RewriteInstance::remapLoadableSegments(
       ProgramHeader(ELF::PT_PHDR, ELF::PF_R, PHDRTableOffset, PHDRTableAddress,
                     PHDRTableAddress, PHDRTableSize, PHDRTableSize, 0x8));
   BC->OutputAddressToOffsetMap[PHDRTableAddress] = PHDRTableOffset;
-  std::vector<BinarySection *> NewSegmentContents = BC->getAllNewSections();
+
   if (!BC->HasRelocations) {
     mapFunctionsNonRelocMode(AssignAddress);
   }
@@ -3528,10 +3533,17 @@ void RewriteInstance::remapLoadableSegments(
   // if we instrument without rewriting, we want a single segment at
   // PHDRTableAddress that will be created in mapRuntimeLibrary
   if (BC->getRuntimeLibrary())
-    mapSectionGroup(NewSegmentContents, AssignAddress);
-  else
-    createLoadSegment(NewSegmentContents, AssignAddress, ELF::PF_R | ELF::PF_X,
+    mapSectionGroup(BC->getAllNewSections(), AssignAddress);
+  else {
+    // only get RX sections here after function-sections are mapped in
+    // non-reloc mode
+    auto NewRXSegmentContents = BC->getNewSectionsByFlags(
+        ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, /*ROwithRX*/ true);
+    createLoadSegment(NewRXSegmentContents, AssignAddress, ELF::PF_R | ELF::PF_X,
                       BC->PageAlign, PHDRTableAddress);
+    createLoadSegment(NewRWSegmentContents, AssignAddress, ELF::PF_R | ELF::PF_W,
+                      BC->PageAlign);
+  }
 }
 
 // Processing in non-relocation mode.
@@ -3737,6 +3749,8 @@ void RewriteInstance::createLoadSegment(
     BOLTLinker::SectionMapper AssignAddress, const unsigned p_flags,
     const unsigned p_align, const std::optional<uint64_t> ForceAddress) {
 
+  if (Sections.empty())
+    return;
   if (!ForceAddress) {
     NextAvailableAddress = alignTo(NextAvailableAddress, p_align);
     if (BC->OutputSegments.size() && BC->OutputSegments.back().isLOAD()) {
