@@ -291,6 +291,8 @@ public:
   /// overwritten, but it is okay to re-generate debug info for them.
   std::set<const DWARFUnit *> ProcessedCUs;
 
+  std::map<std::string, BinarySection *> EndSymbols;
+
   // Setup MCPlus target builder
   void initializeTarget(std::unique_ptr<MCPlusBuilder> TargetBuilder) {
     MIB = std::move(TargetBuilder);

@@ -1,4 +1,11 @@
+
+PHDRS
+{
+  text PT_LOAD FILEHDR PHDRS;
+}
+
 SECTIONS {
+  . = SIZEOF_HEADERS;
   .fini_array    :
   {
     PROVIDE_HIDDEN (__fini_array_start = .);
@@ -9,4 +16,13 @@ SECTIONS {
   . = . + 128;
 
   .text : { *(.text) }
+  .text : { *(.text) } :text
+  /DISCARD/ : {
+    *(.eh_frame);
+    *(.comment);
+    *(.got);
+    *(.got.plt);
+    *(.data);
+    *(.bss)
+  }
 }

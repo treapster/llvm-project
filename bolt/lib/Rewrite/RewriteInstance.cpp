@@ -951,7 +951,7 @@ void RewriteInstance::discoverFileObjects() {
 
     section_iterator Section =
         cantFail(Symbol.getSection(), "cannot get symbol section");
-    if (Section == InputFile->section_end()) {
+    if (Section == InputFile->section_end() || !Section->getName()) {
       // Could be an absolute symbol. Used on RISC-V for __global_pointer$ so we
       // need to record it to handle relocations against it. For other instances
       // of absolute symbols, we record for pretty printing.
@@ -967,11 +967,19 @@ void RewriteInstance::discoverFileObjects() {
 
     if (Address == Section->getAddress() + Section->getSize()) {
       assert(SymbolSize == 0 &&
-             "unexpect non-zero sized symbol at end of section");
-      LLVM_DEBUG(
-          dbgs()
-          << "BOLT-DEBUG: rejecting as symbol points to end of its section\n");
-      registerName(SymbolSize);
+             "unexpected non-zero sized symbol at end of section");
+
+      if (auto BSec =
+              BC->getUniqueSectionByName(cantFail(Section->getName()))) {
+        BC->EndSymbols[UniqueName] = &*BSec;
+        registerName(SymbolSize);
+        LLVM_DEBUG(dbgs() << formatv("BOLT-INFO: {0} is in the end of {1}\n",
+                                     Name, BSec->getName()));
+      } else {
+        LLVM_DEBUG(
+            dbgs()
+            << "BOLT-INFO: rejecting as symbol points to end of its section\n");
+      }
       continue;
     }
 
@@ -4566,6 +4574,16 @@ void RewriteInstance::updateELFSymbolTable(
              << Twine::utohexstr(NewSymbol.st_value) << '\n';
     };
 
+    auto SetToEnd = [&](BinarySection *Section) {
+      if (Section->getOutputName() == ".bolt.org.text") {
+        // move .text end symbol with text itself.
+        Section = &BC->getUniqueSectionByName(".text").get();
+      }
+      NewSymbol.st_value =
+          Section->getOutputAddress() + Section->getOutputSize();
+      NewSymbol.st_shndx = Section->getIndex();
+    };
+
     if (opts::HotText &&
         (*SymbolName == "__hot_start" || *SymbolName == "__hot_end")) {
       updateSymbolValue(*SymbolName);
@@ -4577,6 +4595,10 @@ void RewriteInstance::updateELFSymbolTable(
       updateSymbolValue(*SymbolName);
       ++NumHotDataSymsUpdated;
     }
+
+    std::string UniqueName = (*SymbolName + "/1").str();
+    if (auto It = BC->EndSymbols.find(UniqueName); It != BC->EndSymbols.end())
+      SetToEnd(It->second);
 
     if (*SymbolName == "_end")
       updateSymbolValue(*SymbolName, NextAvailableAddress);
