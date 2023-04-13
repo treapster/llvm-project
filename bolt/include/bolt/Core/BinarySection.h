@@ -239,6 +239,7 @@ public:
   StringRef getName() const { return Name; }
   uint64_t getAddress() const { return Address; }
   uint64_t getEndAddress() const { return Address + Size; }
+  uint64_t getOutputEndAddress() const { return OutputAddress + OutputSize; }
   uint64_t getSize() const { return Size; }
   uint64_t getInputFileOffset() const { return InputFileOffset; }
   Align getAlign() const { return Align(Alignment); }
@@ -330,6 +331,8 @@ public:
   /// Does this section have any pending relocations?
   bool hasPendingRelocations() const { return !PendingRelocations.empty(); }
 
+  bool hasDynamicRelocations() const { return !DynamicRelocations.empty(); }
+
   /// Remove non-pending relocation with the given /p Offset.
   bool removeRelocationAt(uint64_t Offset) {
     auto Itr = Relocations.find(Offset);
@@ -377,7 +380,9 @@ public:
     return Itr != Relocations.end() ? &*Itr : nullptr;
   }
 
-  /// Lookup the relocation (if any) at the given /p Offset.
+  uint64_t getNewEndSymbolValue(uint64_t RelocationOffset) const;
+
+  /// Lookup the dynamic relocation (if any) at the given /p Offset.
   const Relocation *getDynamicRelocationAt(uint64_t Offset) const {
     Relocation Key{Offset, 0, 0, 0, 0};
     auto Itr = DynamicRelocations.find(Key);

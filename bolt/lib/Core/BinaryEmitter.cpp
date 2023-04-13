@@ -1188,7 +1188,11 @@ void BinaryEmitter::emitDataSections(StringRef OrgSecPrefix) {
            ".text should not have relocations!");
 
     Section.emitAsData(Streamer, Section.getOutputName());
-    Section.clearRelocations();
+    // because dynamic relocations usually contain addresses without symbols,
+    // we neeed to preserve usual relocations to detect end-of section
+    // references
+    if (!Section.hasDynamicRelocations())
+      Section.clearRelocations();
   }
 }
 

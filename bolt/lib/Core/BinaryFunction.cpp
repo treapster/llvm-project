@@ -1408,6 +1408,19 @@ bool BinaryFunction::disassemble() {
 
       if (!BC.isRISCV() && MIB->hasPCRelOperand(Instruction) && !UsedReloc)
         handlePCRelOperand(Instruction, AbsoluteInstrAddr, Size);
+    } else if (const Relocation *Rel =
+                   getRelocationInRange(Offset, Offset + Size)) {
+      if (auto *Sym = Rel->Symbol)
+        if (auto It = BC.EndSymbols.find(Sym->getName());
+            It != BC.EndSymbols.end()) {
+          int64_t Value;
+          LLVM_DEBUG(
+              dbgs() << formatv(
+                  "BOLT-INFO: end symbol {0} referenced in {1} + {2:x}\n",
+                  Sym->getName(), getOneName(), Offset););
+          BC.MIB->replaceImmWithSymbolRef(Instruction, Sym, Rel->Addend,
+                                          Ctx.get(), Value, Rel->Type);
+        }
     }
 
 add_instruction:

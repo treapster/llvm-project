@@ -114,7 +114,7 @@ struct JITLinkLinker::Context : jitlink::JITLinkContext {
           BSecIt != Linker.BC.EndSymbols.end()) {
         BinarySection *BSec = BSecIt->second;
         assert(BSec->getOutputAddress() && "Unmapped section!");
-        uint64_t Address = BSec->getOutputAddress() + BSec->getOutputSize();
+        uint64_t Address = BSec->getOutputEndAddress();
         AllResults[Symbol.first] = orc::ExecutorSymbolDef(
             orc::ExecutorAddr(Address), JITSymbolFlags());
         LLVM_DEBUG(

@@ -32,6 +32,21 @@ bool BinarySection::isELF() const { return BC.isELF(); }
 
 bool BinarySection::isMachO() const { return BC.isMachO(); }
 
+// If there is a Relocation at Offset which references end-of-section symbol,
+// return the new value for it
+uint64_t BinarySection::getNewEndSymbolValue(uint64_t RelocationOffset) const {
+  if (const Relocation *R = getRelocationAt(RelocationOffset))
+    if (auto *Sym = R->Symbol)
+      if (auto BSecIt = BC.EndSymbols.find(Sym->getName());
+          BSecIt != BC.EndSymbols.end()) {
+        BinarySection *BSec = BSecIt->second;
+        assert(BSec->getOutputAddress() && "Unmapped section!");
+        uint64_t NewValue = BSec->getOutputEndAddress();
+        return NewValue;
+      }
+  return 0;
+}
+
 /// Add a new relocation at the given /p Offset.
 void BinarySection::addRelocation(uint64_t Offset, MCSymbol *Symbol,
                                   uint64_t Type, uint64_t Addend,

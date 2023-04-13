@@ -964,14 +964,17 @@ void RewriteInstance::discoverFileObjects() {
     LLVM_DEBUG(dbgs() << "BOLT-DEBUG: considering symbol " << UniqueName
                       << " for function\n");
 
-    if (Address == Section->getAddress() + Section->getSize()) {
+    if (SymbolType != SymbolRef::ST_Debug &&
+        Address == Section->getAddress() + Section->getSize()) {
       assert(SymbolSize == 0 &&
              "unexpected non-zero sized symbol at end of section");
 
       if (auto BSec =
               BC->getUniqueSectionByName(cantFail(Section->getName()))) {
-        BC->EndSymbols[UniqueName] = &*BSec;
-        registerName(SymbolSize);
+        // we don't register name because it can collide with data from the next
+        // section on the same address. We'll instead create local MCSymbols
+        // when we encounter relocations against such symbols
+        BC->EndSymbols[Name] = &*BSec;
         LLVM_DEBUG(dbgs() << formatv("BOLT-INFO: {0} is in the end of {1}\n",
                                      Name, BSec->getName()));
       } else {
@@ -2020,8 +2023,7 @@ bool RewriteInstance::analyzeRelocation(
   ErrorOr<uint64_t> Value =
       BC->getUnsignedValueAtAddress(Rel.getOffset(), RelSize);
   assert(Value && "failed to extract relocated value");
-  if ((Skip = Relocation::skipRelocationProcess(RType, *Value)))
-    return true;
+  Skip = Relocation::skipRelocationProcess(RType, *Value);
 
   ExtractedValue = Relocation::extractValue(RType, *Value, Rel.getOffset());
   Addend = getRelocationAddend(InputFile, Rel);
@@ -2029,8 +2031,11 @@ bool RewriteInstance::analyzeRelocation(
   const bool IsPCRelative = Relocation::isPCRelative(RType);
   const uint64_t PCRelOffset = IsPCRelative && !IsAArch64 ? Rel.getOffset() : 0;
   bool SkipVerification = false;
+
   auto SymbolIter = Rel.getSymbol();
   if (SymbolIter == InputFile->symbol_end()) {
+    if (Skip)
+      return true;
     SymbolAddress = ExtractedValue - Addend + PCRelOffset;
     MCSymbol *RelSymbol =
         BC->getOrCreateGlobalSymbol(SymbolAddress, "RELSYMat");
@@ -2039,6 +2044,17 @@ bool RewriteInstance::analyzeRelocation(
   } else {
     const SymbolRef &Symbol = *SymbolIter;
     SymbolName = std::string(cantFail(Symbol.getName()));
+
+    if (auto It = BC->EndSymbols.find(SymbolName); It != BC->EndSymbols.end()) {
+      // We have to preserve relocation to end symbol even for possibly relaxed
+      // adrp+add/ldr
+      bool IsAdr = IsAArch64 && (*Value & 0x9f000000) == 0x10000000;
+      if (IsAdr)
+        Skip = false;
+    }
+
+    if (Skip)
+      return true;
     SymbolAddress = cantFail(Symbol.getAddress());
     SkipVerification = (cantFail(Symbol.getType()) == SymbolRef::ST_Other);
     // Section symbols are marked as ST_Debug.
@@ -2410,13 +2426,6 @@ void RewriteInstance::handleRelocation(BinarySection &RelocatedSection,
       return;
   }
 
-  if (!IsAArch64 && BC->getDynamicRelocationAt(Rel.getOffset())) {
-    LLVM_DEBUG({
-      dbgs() << formatv("BOLT-DEBUG: address {0:x} has a ", Rel.getOffset())
-             << "dynamic relocation against it. Ignoring static relocation.\n";
-    });
-    return;
-  }
 
   std::string SymbolName;
   uint64_t SymbolAddress;
@@ -2467,7 +2476,14 @@ void RewriteInstance::handleRelocation(BinarySection &RelocatedSection,
   }
 
   MCSymbol *ReferencedSymbol = nullptr;
-  if (!IsSectionRelocation)
+  bool IsToSectionEnd = false;
+  if (auto It = BC->EndSymbols.find(SymbolName); It != BC->EndSymbols.end()) {
+    // We need to create local symbol because using registerName will collide
+    // with the next section if it's on the same address. This requires us to
+    // check for EndSymbols in a lot of places, but what else can we do?
+    ReferencedSymbol = BC->Ctx->getOrCreateSymbol(SymbolName);
+    IsToSectionEnd = true;
+  } else if (!IsSectionRelocation)
     if (BinaryData *BD = BC->getBinaryDataByName(SymbolName))
       ReferencedSymbol = BD->getSymbol();
 
@@ -2609,7 +2625,9 @@ void RewriteInstance::handleRelocation(BinarySection &RelocatedSection,
     }
   }
 
-  if (ForceRelocation) {
+  if (IsToSectionEnd) {
+    // do nothing, add it as it is later
+  } else if (ForceRelocation) {
     std::string Name =
         Relocation::isGOT(RType) ? SymbolName + "@GOT" : SymbolName;
     // ReferencedSymbol = BC->registerNameAtAddress(Name, Address, 0, 0);
@@ -4679,8 +4697,7 @@ void RewriteInstance::updateELFSymbolTable(
         // move .text end symbol with text itself.
         Section = &BC->getUniqueSectionByName(".text").get();
       }
-      NewSymbol.st_value =
-          Section->getOutputAddress() + Section->getOutputSize();
+      NewSymbol.st_value = Section->getOutputEndAddress();
       NewSymbol.st_shndx = Section->getIndex();
     };
 
@@ -4696,8 +4713,7 @@ void RewriteInstance::updateELFSymbolTable(
       ++NumHotDataSymsUpdated;
     }
 
-    std::string UniqueName = (*SymbolName + "/1").str();
-    if (auto It = BC->EndSymbols.find(UniqueName); It != BC->EndSymbols.end())
+    if (auto It = BC->EndSymbols.find(*SymbolName); It != BC->EndSymbols.end())
       SetToEnd(It->second);
 
     if (*SymbolName == "_end")
@@ -4904,13 +4920,15 @@ void RewriteInstance::patchELFAllocatableRelrSection(
   const uint64_t MaxDelta = ((CHAR_BIT * DynamicRelrEntrySize) - 1) * PSize;
 
   auto FixAddend = [&](const BinarySection &Section, const Relocation &Rel) {
-    // Fix relocation symbol value in place if no static relocation found
-    // on the same address
-    if (Section.getRelocationAt(Rel.Offset))
-      return;
+    uint64_t Addend = 0;
 
+    if (const uint64_t EndSymValue = Section.getNewEndSymbolValue(Rel.Offset))
+      Addend = EndSymValue;
+
+    if (!Addend)
+      Addend = getNewFunctionOrDataAddress(Rel.Addend);
     // No fixup needed if symbol address was not changed
-    const uint64_t Addend = getNewFunctionOrDataAddress(Rel.Addend);
+
     if (!Addend)
       return;
 
@@ -5053,7 +5071,14 @@ RewriteInstance::patchELFAllocatableRelaSections(ELFObjectFile<ELFT> *File) {
           SymbolIdx = getOutputDynamicSymbolIndex(Symbol);
         } else {
           // Usually this case is used for R_*_(I)RELATIVE relocations
-          const uint64_t Address = getNewFunctionOrDataAddress(Addend);
+
+          // Check if it's end-of-section relocation first because they're
+          // tricky
+          uint64_t Address = Section.getNewEndSymbolValue(Rel.Offset);
+
+          if (!Address)
+            Address = getNewFunctionOrDataAddress(Rel.Addend);
+
           if (Address)
             Addend = Address;
         }

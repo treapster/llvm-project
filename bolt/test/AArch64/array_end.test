@@ -9,7 +9,7 @@
 // RUN:  --print-only="callFini" --debug-only=bolt 2>&1 | FileCheck %s
 
 // CHECK: BOLT-INFO: __fini_array_end is in the end of .fini_array
-// CHECK: adr [[REG:x[0-28]+]], "__fini_array_end/1"
+// CHECK: adr [[REG:x[0-28]+]], __fini_array_end
 
 // RUN: llvm-bolt %t.exe -o %t.bolt.rewritten --rewrite --print-disasm \
 // RUN:  --print-only="callFini" --debug-only=bolt 2>&1 | FileCheck %s
