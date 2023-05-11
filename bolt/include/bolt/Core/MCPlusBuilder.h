@@ -595,6 +595,11 @@ public:
     return false;
   }
 
+  virtual bool isCall64m(const MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   virtual bool isLeave(const MCInst &Inst) const { return false; }
 
   virtual bool isADD(const MCInst &Inst) const {

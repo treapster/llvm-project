@@ -16,6 +16,7 @@
 #include "bolt/Core/DynoStats.h"
 #include "bolt/Core/HashUtilities.h"
 #include "bolt/Core/MCPlusBuilder.h"
+#include "bolt/Utils/CommandLineOpts.h"
 #include "bolt/Utils/NameResolver.h"
 #include "bolt/Utils/NameShortener.h"
 #include "bolt/Utils/Utils.h"
@@ -1324,9 +1325,23 @@ bool BinaryFunction::disassemble() {
         // Indirect call. We only need to fix it if the operand is RIP-relative.
         if (IsSimple && MIB->hasPCRelOperand(Instruction))
           handlePCRelOperand(Instruction, AbsoluteInstrAddr, Size);
-
-        if (BC.isAArch64())
+        else if (opts::Rewrite && BC.isX86() &&
+                 BC.MIB->isCall64m(Instruction)) {
+          // Indirect call with possible absolute immediate. Here we assume
+          // that a relocation is present if we have such immediate and replace
+          // the immediate with symbol ref.
+          if (const Relocation *Rel =
+                  getRelocationInRange(Offset, Offset + Size)) {
+            assert(Rel->Symbol && "Indirect call without referenced symbol!");
+            int64_t Value = Rel->Value;
+            bool Ok = BC.MIB->replaceImmWithSymbolRef(Instruction, Rel->Symbol,
+                                                      Rel->Addend, Ctx.get(),
+                                                      Value, Rel->Type);
+            assert(Ok && "Failed to replace immediate with symbol ref!");
+          }
+        } else if (BC.isAArch64()) {
           handleAArch64IndirectCall(Instruction, Offset);
+        }
       }
     } else if (BC.isAArch64() || BC.isRISCV()) {
       // Check if there's a relocation associated with this instruction.
