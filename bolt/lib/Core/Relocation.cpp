@@ -212,7 +212,8 @@ static bool skipRelocationTypeX86(uint64_t Type) {
 }
 
 static bool skipRelocationTypeAArch64(uint64_t Type) {
-  return Type == ELF::R_AARCH64_NONE || Type == ELF::R_AARCH64_LD_PREL_LO19;
+  return Type == ELF::R_AARCH64_NONE || Type == ELF::R_AARCH64_LD_PREL_LO19 ||
+         Type == ELF::R_AARCH64_TLSDESC_CALL;
 }
 
 static bool skipRelocationTypeRISCV(uint64_t Type) {
@@ -373,7 +374,6 @@ static uint64_t extractValueAArch64(uint64_t Type, uint64_t Contents,
     return static_cast<int64_t>(PC) + SignExtend64<32>(Contents & 0xffffffff);
   case ELF::R_AARCH64_PREL64:
     return static_cast<int64_t>(PC) + Contents;
-  case ELF::R_AARCH64_TLSDESC_CALL:
   case ELF::R_AARCH64_JUMP26:
   case ELF::R_AARCH64_CALL26:
     // Immediate goes in bits 25:0 of B and BL.
