@@ -1504,8 +1504,8 @@ public:
 
   virtual bool patchPLTInstructions(InstructionIterator Begin,
                                     InstructionIterator End,
-                                    const MCSymbol *Target,
-                                    MCContext *Ctx) const {
+                                    const MCSymbol *Target, MCContext *Ctx,
+                                    const MCSymbol *BFSymbol) const {
     llvm_unreachable("not implemented");
   }
 

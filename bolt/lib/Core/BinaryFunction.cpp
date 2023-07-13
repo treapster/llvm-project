@@ -1156,12 +1156,14 @@ void BinaryFunction::handleAArch64IndirectCall(MCInst &Instruction,
                               TargetAddress);
   }
 }
+
 bool BinaryFunction::handlePLT() {
   assert(BasicBlocks.size() == 1);
   return BC.MIB->patchPLTInstructions(BasicBlocks[0]->begin(),
                                       BasicBlocks[0]->end(), getPLTSymbol(),
-                                      BC.Ctx.get());
+                                      BC.Ctx.get(), getSymbol());
 }
+
 bool BinaryFunction::disassemble() {
   NamedRegionTimer T("disassemble", "Disassemble function", "buildfuncs",
                      "Build Binary Functions", opts::TimeBuild);

@@ -1080,8 +1080,8 @@ public:
     return true;
   }
   bool patchPLTInstructions(InstructionIterator Begin, InstructionIterator End,
-                            const MCSymbol *Target,
-                            MCContext *Ctx) const override {
+                            const MCSymbol *Target, MCContext *Ctx,
+                            const MCSymbol *BFSymbol) const override {
     int64_t Val;
     int Count = 0;
     for (auto I = Begin; I != End; ++I) {

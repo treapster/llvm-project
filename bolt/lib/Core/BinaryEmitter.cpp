@@ -222,6 +222,7 @@ void BinaryEmitter::emitPLTFunction(BinaryFunction &BF) {
   MCSection *Section = BC.getCodeSection(BF.getOriginSection()->getName());
   Streamer.switchSection(Section);
   Section->setHasInstructions(true);
+  Streamer.emitLabel(BF.getSymbol());
   for (auto &BB : BF)
     for (auto Instr : BB)
       Streamer.emitInstruction(Instr, *BC.STI);
@@ -233,7 +234,7 @@ void BinaryEmitter::emitFunctions() {
     const bool OriginalAllowAutoPadding = Streamer.getAllowAutoPadding();
     for (BinaryFunction *Function : Functions) {
       if (!BC.shouldEmit(*Function) &&
-          !(Function->isPLTFunction() && opts::Rewrite))
+          !(Function->isPLTFunction() && opts::Rewrite && BC.isRISC()))
         continue;
 
       LLVM_DEBUG(dbgs() << "BOLT: generating code for function \"" << *Function
@@ -245,15 +246,16 @@ void BinaryEmitter::emitFunctions() {
       // Turn off Intel JCC Erratum mitigation for cold code if requested
       if ((HasProfile && opts::X86AlignBranchBoundaryHotOnly &&
            !Function->hasValidProfile()) ||
-          (Function->isPLTFunction() && BC.isAArch64()))
+          Function->isPLTFunction())
         Streamer.setAllowAutoPadding(false);
 
-      if (Function->isPLTFunction() && BC.isAArch64()) {
+      if (Function->isPLTFunction()) {
         emitPLTFunction(*Function);
         Function->setEmitted(/*KeepCFG=*/false);
         Streamer.setAllowAutoPadding(OriginalAllowAutoPadding);
         continue;
       }
+
       FunctionLayout &Layout = Function->getLayout();
       Emitted |= emitFunction(*Function, Layout.getMainFragment());
 

@@ -105,6 +105,7 @@ static bool isSupportedRISCV(uint64_t Type) {
   case ELF::R_RISCV_RVC_BRANCH:
   case ELF::R_RISCV_ADD32:
   case ELF::R_RISCV_SUB32:
+  case ELF::R_RISCV_64:
     return true;
   }
 }
@@ -202,6 +203,7 @@ static size_t getSizeForTypeRISCV(uint64_t Type) {
   case ELF::R_RISCV_SUB32:
     return 4;
   case ELF::R_RISCV_GOT_HI20:
+  case ELF::R_RISCV_64:
     // See extractValueRISCV for why this is necessary.
     return 8;
   }
@@ -515,6 +517,7 @@ static uint64_t extractValueRISCV(uint64_t Type, uint64_t Contents,
     return SignExtend64<8>(((Contents >> 2) & 0x1f) | ((Contents >> 5) & 0xe0));
   case ELF::R_RISCV_ADD32:
   case ELF::R_RISCV_SUB32:
+  case ELF::R_RISCV_64:
     return Contents;
   }
 }
@@ -677,6 +680,7 @@ static bool isPCRelativeRISCV(uint64_t Type) {
     llvm_unreachable("Unknown relocation type");
   case ELF::R_RISCV_ADD32:
   case ELF::R_RISCV_SUB32:
+  case ELF::R_RISCV_64:
     return false;
   case ELF::R_RISCV_JAL:
   case ELF::R_RISCV_CALL:
@@ -816,6 +820,8 @@ bool Relocation::isPCRelative(uint64_t Type) {
 uint64_t Relocation::getAbs64() {
   if (Arch == Triple::aarch64)
     return ELF::R_AARCH64_ABS64;
+  if (Arch == Triple::riscv64)
+    return ELF::R_RISCV_64;
   return ELF::R_X86_64_64;
 }
 

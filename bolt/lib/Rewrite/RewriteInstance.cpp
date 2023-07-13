@@ -1433,11 +1433,11 @@ void RewriteInstance::createGOTPLTRelocations() {
     for (uint64_t DataOffset = 0; DataOffset < Size;) {
       const uint64_t Offset = DataOffset;
       const uint64_t Address = DE.getU64(&DataOffset);
-      if (Address == 0)
+      if (Address == 0 || Address == ~0ULL)
         continue;
       MCSymbol *Sym = BC->getOrCreateGlobalSymbol(Address, "SYMBOLat");
       Section.addRelocation(Offset, Sym, RelType, 0);
-      if (!IsGot || BC->isX86())
+      if (!IsGot || !BC->isRISC())
         continue;
       if (BinaryData *BD = BC->getBinaryDataAtAddress(Address)) {
         for (auto *Sym : BD->getSymbols()) {
@@ -1485,14 +1485,13 @@ void RewriteInstance::disassemblePLTSectionRISCV(BinarySection &Section) {
     }
   };
 
-  // Skip the first special entry since no relocation points to it.
-  uint64_t InstrOffset = 32;
+  uint64_t InstrOffset = 0;
 
   while (InstrOffset < SectionSize) {
     InstructionListType Instructions;
     MCInst Instruction;
     const uint64_t EntryOffset = InstrOffset;
-    const uint64_t EntrySize = 16;
+    uint64_t EntrySize = EntryOffset == 0 ? 32 : 16;
     uint64_t InstrSize;
 
     while (InstrOffset < EntryOffset + EntrySize) {
@@ -1505,7 +1504,34 @@ void RewriteInstance::disassemblePLTSectionRISCV(BinarySection &Section) {
     const uint64_t TargetAddress = BC->MIB->analyzePLTEntry(
         Instructions.begin(), Instructions.end(), EntryAddress);
 
-    createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
+    BinaryFunction *BF =
+        createPLTBinaryFunction(TargetAddress, EntryAddress, EntrySize);
+    assert(BF && "Failed to create PLT function");
+    if (opts::Rewrite) {
+      assert(BF && BF->empty());
+      BF->setSize(EntrySize);
+      BF->updateState(BinaryFunction::State::Disassembled);
+      BinaryBasicBlock *BB = BF->addBasicBlockAt(0, BF->getSymbol());
+      for (auto &Inst : Instructions) {
+        BB->addInstruction(Inst);
+      }
+      bool Ok = BF->handlePLT();
+      assert(Ok && "Failed to handle PLT entry");
+      (void)Ok;
+      BF->updateState(BinaryFunction::State::CFG);
+    }
+    // Skip nops if any
+    while (InstrOffset < SectionSize) {
+      disassembleInstruction(InstrOffset, Instruction, InstrSize);
+      if (!BC->MIB->isNoop(Instruction))
+        break;
+
+      InstrOffset += InstrSize;
+      if (opts::Rewrite) {
+        BF->getBasicBlockAtOffset(0)->addInstruction(Instruction);
+        BF->setSize(BF->getSize() + InstrSize);
+      }
+    }
   }
 }
 
@@ -2060,7 +2086,7 @@ bool RewriteInstance::analyzeRelocation(
     // Section symbols are marked as ST_Debug.
     IsSectionRelocation = (cantFail(Symbol.getType()) == SymbolRef::ST_Debug);
     // Check for PLT entry registered with symbol name
-    if (Relocation::isGOT(RType) && (IsAArch64 || BC->isRISCV())) {
+    if (Relocation::isGOT(RType) && (BC->isRISC())) {
       if (auto It =
               GOTSymbolsByName.find(SymbolName.substr(0, SymbolName.find("@")));
           It != GOTSymbolsByName.end()) {
@@ -2130,7 +2156,7 @@ bool RewriteInstance::analyzeRelocation(
     if (SkipVerification)
       return true;
 
-    if (IsAArch64 || BC->isRISCV())
+    if (BC->isRISC())
       return true;
 
     if (SymbolName == "__hot_start" || SymbolName == "__hot_end")
@@ -2256,9 +2282,14 @@ void RewriteInstance::readDynamicRelocations(const SectionRef &Section,
     if (Symbol)
       SymbolIndex[Symbol] = getRelocationSymbol(InputFile, Rel);
 
-    if (BC->isAArch64() &&
-        (RType == ELF::R_AARCH64_GLOB_DAT || RType == ELF::R_AARCH64_RELATIVE ||
-         RType == ELF::R_AARCH64_TLS_TPREL64)) {
+    auto IsGotLikeReloc = [this](const uint64_t RType) {
+      return ((BC->isAArch64() && (RType == ELF::R_AARCH64_GLOB_DAT ||
+                                   RType == ELF::R_AARCH64_RELATIVE ||
+                                   RType == ELF::R_AARCH64_TLS_TPREL64)) ||
+              (BC->isRISCV() && RType == ELF::R_RISCV_64));
+    };
+
+    if (IsGotLikeReloc(RType)) {
       if (Symbol && !SymbolName.empty()) {
         GOTSymbolsByName[SymbolName.str()] = Rel.getOffset();
         LLVM_DEBUG(dbgs() << formatv("BOLT-INFO: GOT entry at {0:x} contains "
