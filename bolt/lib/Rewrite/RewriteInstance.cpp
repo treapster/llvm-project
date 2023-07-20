@@ -3847,20 +3847,39 @@ RewriteInstance::getSectionsForSegment(const ProgramHeader &Phdr,
     }
   }
 
+  auto GetSectionIt = [&Result](StringRef Name) {
+    return std::find_if(
+        Result.begin(), Result.end(),
+        [Name](BinarySection *Sec) { return Sec->getOutputName() == Name; });
+  };
+
   if (IncludeNew && Phdr.isLOAD()) {
     std::vector<BinarySection *> Extra = BC->getNewSectionsByFlags(
         Phdr.getSectionFlags(), /*ROwithRX*/ !HasReadOnlySegment);
     // We need to put .text.cold after .text
     auto PosForNewSections = Result.end();
     if (Phdr.isExec()) {
-      PosForNewSections =
-          std::find_if(Result.begin(), Result.end(), [](BinarySection *Sec) {
-            return Sec->getOutputName() == ".text";
-          });
+      PosForNewSections = GetSectionIt(".text");
       if (PosForNewSections != Result.end())
         ++PosForNewSections;
     }
     Result.insert(PosForNewSections, Extra.begin(), Extra.end());
+  }
+  if (opts::Rewrite && Phdr.isExec()) {
+    // Put .plt before .text because:
+    // - it makes clear where PLT will be relative to .text, which simplifies
+    // stub insertion for AArch64. Without it we can't decide where to insert
+    // stubs because we don't know the final binary layout before linking.
+    // - unless --hot-functions-at-end is used, PLT comes just before hot text
+    // section which increases locality.
+    auto PltIt = GetSectionIt(".plt");
+    if (PltIt != Result.end()) {
+      BinarySection *Plt = *PltIt;
+      Result.erase(PltIt);
+      auto TextIt = GetSectionIt(".text");
+      assert(TextIt != Result.end() && "No .text section!");
+      Result.insert(TextIt, Plt);
+    }
   }
   Result.insert(Result.end(), Nobits.begin(), Nobits.end());
   return Result;
