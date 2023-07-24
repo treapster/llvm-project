@@ -375,7 +375,7 @@ uint64_t LongJmpPass::tentativeLayoutRelocMode(
 
 void LongJmpPass::tentativeLayout(
     const BinaryContext &BC, std::vector<BinaryFunction *> &SortedFunctions) {
-  uint64_t DotAddress = BC.InputAddressSpaceEnd;
+  uint64_t DotAddress = BC.NewTextSectionAddress;
 
   if (!BC.HasRelocations) {
     for (BinaryFunction *Func : SortedFunctions) {
@@ -418,9 +418,8 @@ void LongJmpPass::tentativeLayout(
       TentativePLTAddress =
           DotAddress - alignTo(PLTSec->getSize(), opts::AlignText);
     }
-  } else {
-    DotAddress = alignTo(BC.InputAddressSpaceEnd, opts::AlignText);
   }
+  assert(DotAddress && "No tentative text address!");
   tentativeLayoutRelocMode(BC, SortedFunctions, DotAddress);
 }
 

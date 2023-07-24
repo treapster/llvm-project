@@ -56,6 +56,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -499,8 +500,9 @@ Error RewriteInstance::discoverStorage() {
     return E;
 
   ELF64LE::PhdrRange PHs = PHsOrErr.get();
-  Phnum = PHs.end() - PHs.begin();
+  unsigned Phnum = PHs.end() - PHs.begin();
   uint64_t FirstAllocOffset = ~0ULL;
+  uint64_t EndOfLoadablePartOffset = 0;
   for (const ELF64LE::Phdr &Phdr : PHs) {
     switch (Phdr.p_type) {
     case ELF::PT_LOAD:
@@ -511,6 +513,9 @@ Error RewriteInstance::discoverStorage() {
       BC->InputAddressSpaceEnd =
           std::max(BC->InputAddressSpaceEnd,
                    alignTo(Phdr.p_vaddr + Phdr.p_memsz, BC->PageAlign));
+      EndOfLoadablePartOffset =
+          std::max(EndOfLoadablePartOffset,
+                   alignTo(Phdr.p_offset + Phdr.p_memsz, BC->PageAlign));
       BC->SegmentMapInfo[Phdr.p_vaddr] = ProgramHeader(Phdr);
       if (Phdr.p_flags == ELF::PF_R)
         HasReadOnlySegment = true;
@@ -548,6 +553,39 @@ Error RewriteInstance::discoverStorage() {
   outs() << "BOLT-INFO: first alloc address is 0x"
          << Twine::utohexstr(BC->FirstAllocAddress) << '\n';
 
+  if (!opts::Rewrite && !opts::UseOldText) {
+    // when not rewriting, compute the new text section and segment addresses in
+    // advance. Needed for LongJMP.
+    FirstNonAllocatableOffset = EndOfLoadablePartOffset;
+    uint64_t NextAvailableOffset = EndOfLoadablePartOffset;
+    NextAvailableAddress = BC->InputAddressSpaceEnd;
+    if (NextAvailableOffset <= NextAvailableAddress - BC->FirstAllocAddress)
+      NextAvailableOffset = NextAvailableAddress - BC->FirstAllocAddress;
+    else
+      NextAvailableAddress = NextAvailableOffset + BC->FirstAllocAddress;
+
+    assert(NextAvailableOffset ==
+               NextAvailableAddress - BC->FirstAllocAddress &&
+           "PHDR table address calculation error");
+
+    BC->OutputAddressToOffsetMap[NextAvailableAddress] = NextAvailableOffset;
+
+    unsigned MaxPhnum = Phnum + !HasProgramHeaderSegment + 2;
+
+    BC->MaxPHDRSize = MaxPhnum * sizeof(ELF64LE::Phdr);
+
+    PHDRTableAddress = NextAvailableAddress;
+    PHDRTableOffset = NextAvailableOffset;
+    NextAvailableAddress += BC->MaxPHDRSize;
+    NextAvailableOffset += BC->MaxPHDRSize;
+
+    NextAvailableAddress = alignTo(
+        NextAvailableAddress, std::max(opts::AlignText, opts::AlignFunctions));
+    BC->NewTextSectionAddress = NextAvailableAddress;
+    outs() << "BOLT-INFO: creating new program header table at address 0x"
+           << Twine::utohexstr(PHDRTableAddress) << ", offset 0x"
+           << Twine::utohexstr(PHDRTableOffset) << '\n';
+  }
   // Tools such as objcopy can strip section contents but leave header
   // entries. Check that at least .text is mapped in the file.
   if (!getFileOffsetForAddress(BC->OldTextSectionAddress))
@@ -3532,48 +3570,19 @@ void RewriteInstance::remapLoadableSegments(
     }
   }
 
-  uint64_t NextAvailableOffset = 0;
   for (const ProgramHeader &Phdr : BC->loadableSegments()) {
     copySegment(Phdr, AssignAddress);
-    NextAvailableAddress =
-        std::max(NextAvailableAddress, Phdr.p_vaddr + Phdr.p_memsz);
-    NextAvailableOffset =
-        std::max(NextAvailableOffset, Phdr.p_offset + Phdr.p_filesz);
   }
 
-  FirstNonAllocatableOffset = NextAvailableOffset;
-  NextAvailableAddress = alignTo(NextAvailableAddress, BC->PageAlign);
-  NextAvailableOffset = alignTo(NextAvailableOffset, BC->PageAlign);
-  if (NextAvailableOffset <= NextAvailableAddress - BC->FirstAllocAddress)
-    NextAvailableOffset = NextAvailableAddress - BC->FirstAllocAddress;
-  else
-    NextAvailableAddress = NextAvailableOffset + BC->FirstAllocAddress;
-
-  assert(NextAvailableOffset == NextAvailableAddress - BC->FirstAllocAddress &&
-         "PHDR table address calculation error");
-
-  outs() << "BOLT-INFO: creating new program header table at address 0x"
-         << Twine::utohexstr(NextAvailableAddress) << ", offset 0x"
-         << Twine::utohexstr(NextAvailableOffset) << '\n';
-
-  PHDRTableAddress = NextAvailableAddress;
-  PHDRTableOffset = NextAvailableOffset;
-
-  auto NewRWSegmentContents =
-      BC->getNewSectionsByFlags(ELF::SHF_ALLOC | ELF::SHF_WRITE);
-
-  Phnum += !HasProgramHeaderSegment + 1;
-  if (!BC->getRuntimeLibrary())
-    Phnum += !NewRWSegmentContents.empty();
-  uint64_t PHDRTableSize = Phnum * sizeof(ELF64LE::Phdr);
-  NextAvailableAddress += PHDRTableSize;
-  NextAvailableOffset += PHDRTableSize;
-
+  assert(NextAvailableAddress && "Uninitialized NextAvailableAddress!");
+  assert(PHDRTableAddress && PHDRTableOffset &&
+         "Uninitialized PHDRTable location!");
   BC->OutputSegments.insert(
       BC->OutputSegments.begin(),
       ProgramHeader(ELF::PT_PHDR, ELF::PF_R, PHDRTableOffset, PHDRTableAddress,
-                    PHDRTableAddress, PHDRTableSize, PHDRTableSize, 0x8));
-  BC->OutputAddressToOffsetMap[PHDRTableAddress] = PHDRTableOffset;
+                    PHDRTableAddress,
+                    /* file/mem size will be adjusted in writeELFPHDRTable*/ 0,
+                    0, 0x8));
 
   if (!BC->HasRelocations) {
     mapFunctionsNonRelocMode(AssignAddress);
@@ -3584,14 +3593,14 @@ void RewriteInstance::remapLoadableSegments(
   if (BC->getRuntimeLibrary())
     mapSectionGroup(BC->getAllNewSections(), AssignAddress);
   else {
-    // only get RX sections here after function-sections are mapped in
-    // non-reloc mode
-    auto NewRXSegmentContents = BC->getNewSectionsByFlags(
-        ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, /*ROwithRX*/ true);
-    createLoadSegment(NewRXSegmentContents, AssignAddress, ELF::PF_R | ELF::PF_X,
-                      BC->PageAlign, PHDRTableAddress);
-    createLoadSegment(NewRWSegmentContents, AssignAddress, ELF::PF_R | ELF::PF_W,
-                      BC->PageAlign);
+    createLoadSegment(
+        BC->getNewSectionsByFlags(ELF::SHF_ALLOC | ELF::SHF_EXECINSTR,
+                                  /*ROwithRX*/ true),
+        AssignAddress, ELF::PF_R | ELF::PF_X, BC->PageAlign, PHDRTableAddress);
+    // In case writable sections were emitted, put them in a separate segment.
+    createLoadSegment(
+        BC->getNewSectionsByFlags(ELF::SHF_ALLOC | ELF::SHF_WRITE),
+        AssignAddress, ELF::PF_R | ELF::PF_W, BC->PageAlign);
   }
 }
 
@@ -3908,11 +3917,14 @@ void RewriteInstance::mapLoadableSegments(
   PHDRTableOffset = 0x40;
   NextAvailableAddress = BaseAddress + PHDRTableOffset;
   PHDRTableAddress = NextAvailableAddress;
+  assert(BC->OutputAddressToOffsetMap.empty() && "Unexpected mapping!");
 
   BC->OutputAddressToOffsetMap[BaseAddress] = 0;
   // add PHDR and reserve space for RE/RW segments for runtime library
-  Phnum += !HasProgramHeaderSegment + (!!BC->getRuntimeLibrary()) * 2;
+  uint64_t Phnum = BC->InputSegments.size() + !HasProgramHeaderSegment +
+                   (!!BC->getRuntimeLibrary()) * 2;
   uint64_t PHDRTableSize = Phnum * sizeof(ELF64LE::Phdr);
+  BC->MaxPHDRSize = PHDRTableSize;
   BC->OutputSegments.push_back(
       ProgramHeader(ELF::PT_PHDR, ELF::PF_R, PHDRTableOffset, PHDRTableAddress,
                     PHDRTableAddress, PHDRTableSize, PHDRTableSize, 0x8));
@@ -3968,7 +3980,14 @@ void RewriteInstance::updateOutputValues(const MCAsmLayout &Layout) {
 
 void RewriteInstance::writeELFPHDRTable() {
   raw_fd_ostream &OS = Out->os();
+  assert(PHDRTableOffset && "No PHDR table offset!");
+  assert(BC->OutputSegments.size() && "Empty PHDR!");
+  assert(BC->OutputSegments[0].p_type == ELF::PT_PHDR && "No PHDR segment!");
   OS.seek(PHDRTableOffset);
+  uint64_t PHDRTableSize = BC->OutputSegments.size() * sizeof(ELF64LE::Phdr);
+  assert(PHDRTableSize <= BC->MaxPHDRSize && "Exceeded MaxPHDRSize!");
+  BC->OutputSegments[0].p_filesz = PHDRTableSize;
+  BC->OutputSegments[0].p_memsz = PHDRTableSize;
   for (const auto &Phdr : BC->OutputSegments) {
     ELF64LE::Phdr PhdrToWrite(Phdr);
     OS.write(reinterpret_cast<const char *>(&PhdrToWrite), sizeof(PhdrToWrite));
@@ -4453,7 +4472,7 @@ void RewriteInstance::patchELFSectionHeaderTable(ELFObjectFile<ELFT> *File) {
            "cannot find new address for entry point");
   }
   NewEhdr.e_phoff = PHDRTableOffset;
-  NewEhdr.e_phnum = Phnum;
+  NewEhdr.e_phnum = BC->OutputSegments.size();
   NewEhdr.e_shoff = SHTOffset;
   NewEhdr.e_shnum = OutputSections.size();
   NewEhdr.e_shstrndx = NewSectionIndex[NewEhdr.e_shstrndx];

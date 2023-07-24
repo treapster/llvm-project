@@ -479,7 +479,6 @@ private:
   uint64_t PHDRTableAddress{0};
   uint64_t PHDRTableOffset{0};
   uint64_t BaseAddress{0};
-  unsigned Phnum{0};
   bool HasProgramHeaderSegment{false};
   bool HasReadOnlySegment{false};
   /// Track next available address for new allocatable sections.

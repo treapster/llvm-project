@@ -723,6 +723,9 @@ public:
   // The end of the last loadable segment in the input
   uint64_t InputAddressSpaceEnd{0};
   uint64_t OldTextSectionAddress{0};
+  // Computed in advance when not using --rewrite, otherwise unused
+  uint64_t NewTextSectionAddress{0};
+  uint64_t MaxPHDRSize{0};
 
   /// Address of the code/function that is executed before any other code in
   /// the binary.
