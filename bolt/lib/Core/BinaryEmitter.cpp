@@ -221,6 +221,7 @@ void BinaryEmitter::emitPLTFunction(BinaryFunction &BF) {
   assert(BF.begin() + 1 == BF.end());
   MCSection *Section = BC.getCodeSection(BF.getOriginSection()->getName());
   Streamer.switchSection(Section);
+  Section->setAlignment(Align(BF.getOriginSection()->getAlignment()));
   Section->setHasInstructions(true);
   Streamer.emitLabel(BF.getSymbol());
   for (auto &BB : BF)
