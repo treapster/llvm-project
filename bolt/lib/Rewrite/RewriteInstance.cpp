@@ -2088,7 +2088,8 @@ bool RewriteInstance::analyzeRelocation(
       BC->getUnsignedValueAtAddress(Rel.getOffset(), RelSize);
   assert(Value && "failed to extract relocated value");
   Skip = Relocation::skipRelocationProcess(RType, *Value);
-
+  if (Skip)
+    return true;
   ExtractedValue = Relocation::extractValue(RType, *Value, Rel.getOffset());
   Addend = getRelocationAddend(InputFile, Rel);
 
@@ -2098,8 +2099,6 @@ bool RewriteInstance::analyzeRelocation(
 
   auto SymbolIter = Rel.getSymbol();
   if (SymbolIter == InputFile->symbol_end()) {
-    if (Skip)
-      return true;
     SymbolAddress = ExtractedValue - Addend + PCRelOffset;
     MCSymbol *RelSymbol =
         BC->getOrCreateGlobalSymbol(SymbolAddress, "RELSYMat");
@@ -2109,16 +2108,6 @@ bool RewriteInstance::analyzeRelocation(
     const SymbolRef &Symbol = *SymbolIter;
     SymbolName = std::string(cantFail(Symbol.getName()));
 
-    if (auto It = BC->EndSymbols.find(SymbolName); It != BC->EndSymbols.end()) {
-      // We have to preserve relocation to end symbol even for possibly relaxed
-      // adrp+add/ldr
-      bool IsAdr = IsAArch64 && (*Value & 0x9f000000) == 0x10000000;
-      if (IsAdr)
-        Skip = false;
-    }
-
-    if (Skip)
-      return true;
     SymbolAddress = cantFail(Symbol.getAddress());
     SkipVerification = (cantFail(Symbol.getType()) == SymbolRef::ST_Other);
     // Section symbols are marked as ST_Debug.

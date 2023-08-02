@@ -312,8 +312,10 @@ static bool skipRelocationProcessAArch64(uint64_t &Type, uint64_t Contents) {
   case ELF::R_AARCH64_ADD_ABS_LO12_NC:
   case ELF::R_AARCH64_ADR_GOT_PAGE:
   case ELF::R_AARCH64_LD64_GOT_LO12_NC:
-    if (IsAdr(Contents))
-      return true;
+    if (IsAdr(Contents)) {
+      Type = ELF::R_AARCH64_ADR_PREL_LO21;
+      return false;
+    }
   }
 
   return false;
