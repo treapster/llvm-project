@@ -1982,8 +1982,8 @@ void RewriteInstance::adjustCommandLineOptions() {
   }
 
   if (opts::Rewrite && !BC->HasRelocations) {
-    errs() << "BOLT-WARNING: cannot rewrite in non-relocation mode\n";
-    opts::Rewrite = false;
+    errs() << "BOLT-ERROR: cannot rewrite in non-relocation mode\n";
+    exit(1);
   }
 
   if (opts::AlignText < opts::AlignFunctions)
