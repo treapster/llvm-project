@@ -1095,6 +1095,14 @@ public:
     return Count == 3;
   }
 
+  bool relaxLdrToAdd(MCInst &Inst) const override {
+    assert(Inst.getNumOperands() == 3);
+    assert(Inst.getOpcode() == AArch64::LDRXui);
+    Inst.setOpcode(AArch64::ADDXri);
+    Inst.addOperand(MCOperand::createImm(0)); // zero shift
+    return true;
+  }
+
   bool createUncondBranch(MCInst &Inst, const MCSymbol *TBB,
                           MCContext *Ctx) const override {
     Inst.setOpcode(AArch64::B);

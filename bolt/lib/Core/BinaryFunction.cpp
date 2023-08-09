@@ -1364,6 +1364,9 @@ bool BinaryFunction::disassemble() {
               BC.MIB->matchAdrpPair(Instructions.rbegin()->second, Instruction))
             return RelaxedGOTAccess;
 
+          // We usually can't determine .got address for such relocations,
+          // so we assert that instructions and relocations are consecutive
+          // and extract address from instructions.
           if (Relocation.Type == ELF::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC) {
             assert(std::prev(Itr)->second.Type ==
                        ELF::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 &&
@@ -1407,10 +1410,21 @@ bool BinaryFunction::disassemble() {
               Result;
           TLSAccessNotHandled = false;
         } else {
+
           int64_t Value = Relocation.Value;
           Result = BC.MIB->replaceImmWithSymbolRef(
               Instruction, Relocation.Symbol, Relocation.Addend, Ctx.get(),
               Value, Relocation.Type);
+          if (Relocation.Type == ELF::R_AARCH64_ADD_ABS_LO12_NC &&
+              BC.MIB->isLoad(Instruction)) {
+            // if we see ldr with add-related relocation, it means we
+            // couldn't find the .got entry for referneced symbol during
+            // relocation processing. In that case we have to load symbol
+            // address directly, avoiding .got access altogether. It usually
+            // happens with linker-inserted symbols such as
+            // __{section}_{start,end} and shouldn't cause problems.
+            BC.MIB->relaxLdrToAdd(Instruction);
+          }
         }
         (void)Result;
         assert(Result && "cannot replace immediate with relocation");

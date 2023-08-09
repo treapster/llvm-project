@@ -1085,6 +1085,11 @@ public:
     return false;
   }
 
+  virtual bool relaxLdrToAdd(MCInst &Inst) const {
+    llvm_unreachable("not implemented");
+    return false;
+  }
+
   /// Replace the compound memory operand of Inst with an immediate operand.
   /// The value of the immediate operand is computed by reading the \p
   /// ConstantData array starting from \p offset and assuming little-endianess.

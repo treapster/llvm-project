@@ -2113,11 +2113,41 @@ bool RewriteInstance::analyzeRelocation(
     // Section symbols are marked as ST_Debug.
     IsSectionRelocation = (cantFail(Symbol.getType()) == SymbolRef::ST_Debug);
     // Check for PLT entry registered with symbol name
-    if (Relocation::isGOT(RType) && (BC->isRISC())) {
-      if (auto It =
-              GOTSymbolsByName.find(SymbolName.substr(0, SymbolName.find("@")));
+    if (Relocation::isGOT(RType) && BC->isRISC()) {
+      std::string StrippedName = SymbolName.substr(0, SymbolName.find("@"));
+      if (auto It = GOTSymbolsByName.find(StrippedName);
           It != GOTSymbolsByName.end()) {
         SymbolAddress = It->second;
+      } else {
+        // we can't determine which .got entry is referenced by that
+        // instruction, so we have to relax .got access to direct access. For
+        // adrp it is enough to just change relocation type to load page address
+        // of the symbol itself, while LDR will be handled during disassembly -
+        // we'll change LDR to ADD when we see ldr with
+        // R_AARCH64_ADD_ABS_LO12_NC relocation.
+        switch (RType) {
+        case ELF::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
+        case ELF::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21:
+          // for TLS relocs, we'll match instructions during disassembly to
+          // determine .got entry.
+          break;
+        case ELF::R_AARCH64_ADR_GOT_PAGE:
+          outs() << formatv("BOLT-WARNING: cannot find .got entry for symbol "
+                            "{0} referenced by R_AARCH64_ADR_GOT_PAGE at {1:x}. Will relax to adrp+add\n",
+                            StrippedName, Rel.getOffset());
+          RType = ELF::R_AARCH64_ADR_PREL_PG_HI21;
+          break;
+        case ELF::R_AARCH64_LD64_GOT_LO12_NC:
+          outs() << formatv("BOLT-WARNING: cannot find .got entry for symbol "
+                            "{0} referenced by R_AARCH64_LD64_GOT_LO12_NC at {1:x}. Will relax to adrp+add\n",
+                            StrippedName, Rel.getOffset());
+          RType = ELF::R_AARCH64_ADD_ABS_LO12_NC;
+          break;
+        default:
+          errs() << formatv("BOLT-ERROR: Unexpected .got access relocation at {0:x}: can't find .got entry for {1}!\n",
+                            Rel.getOffset(), StrippedName);
+          exit(1);
+        }
       }
     }
     if (!SymbolAddress && IsAArch64) {
