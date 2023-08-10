@@ -1475,7 +1475,7 @@ void RewriteInstance::createGOTPLTRelocations() {
         continue;
       MCSymbol *Sym = BC->getOrCreateGlobalSymbol(Address, "SYMBOLat");
       Section.addRelocation(Offset, Sym, RelType, 0);
-      if (!IsGot || !BC->isRISC())
+      if (!opts::Rewrite || !IsGot || !BC->isRISC())
         continue;
       if (BinaryData *BD = BC->getBinaryDataAtAddress(Address)) {
         for (auto *Sym : BD->getSymbols()) {
@@ -2113,7 +2113,7 @@ bool RewriteInstance::analyzeRelocation(
     // Section symbols are marked as ST_Debug.
     IsSectionRelocation = (cantFail(Symbol.getType()) == SymbolRef::ST_Debug);
     // Check for PLT entry registered with symbol name
-    if (Relocation::isGOT(RType) && BC->isRISC()) {
+    if (opts::Rewrite && Relocation::isGOT(RType) && BC->isRISC()) {
       std::string StrippedName = SymbolName.substr(0, SymbolName.find("@"));
       if (auto It = GOTSymbolsByName.find(StrippedName);
           It != GOTSymbolsByName.end()) {
@@ -2186,7 +2186,7 @@ bool RewriteInstance::analyzeRelocation(
   // For GOT relocs, do not subtract addend as the addend does not refer
   // to this instruction's target, but it refers to the target in the GOT
   // entry.
-  if (Relocation::isGOT(RType) && (BC->isX86() || !SymbolAddress)) {
+  if (Relocation::isGOT(RType) && (BC->isX86() || !opts::Rewrite)) {
     Addend = 0;
     SymbolAddress = ExtractedValue + PCRelOffset;
   } else if (Relocation::isTLS(RType)) {
@@ -2346,7 +2346,7 @@ void RewriteInstance::readDynamicRelocations(const SectionRef &Section,
               (BC->isRISCV() && RType == ELF::R_RISCV_64));
     };
 
-    if (IsGotLikeReloc(RType)) {
+    if (opts::Rewrite && IsGotLikeReloc(RType)) {
       if (Symbol && !SymbolName.empty()) {
         GOTSymbolsByName[SymbolName.str()] = Rel.getOffset();
         LLVM_DEBUG(dbgs() << formatv("BOLT-INFO: GOT entry at {0:x} contains "
@@ -2716,9 +2716,16 @@ void RewriteInstance::handleRelocation(BinarySection &RelocatedSection,
   if (IsToSectionEnd) {
     // do nothing, add it as it is later
   } else if (ForceRelocation) {
-    std::string Name =
-        Relocation::isGOT(RType) ? SymbolName + "@GOT" : SymbolName;
-    // ReferencedSymbol = BC->registerNameAtAddress(Name, Address, 0, 0);
+    std::string Name = SymbolName;
+    if (Relocation::isGOT(RType)) {
+      if (opts::Rewrite) {
+        Name = SymbolName + "@GOT";
+      } else {
+        Addend = Address;
+        SymbolAddress = 0;
+        Name = "__BOLT_got_zero";
+      }
+    }
     ReferencedSymbol = BC->registerNameAtAddress(Name, SymbolAddress, 0, 0);
     LLVM_DEBUG(
         dbgs() << formatv("BOLT-DEBUG: forcing relocation against symbol {0} "
